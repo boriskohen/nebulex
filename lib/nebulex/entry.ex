@@ -40,7 +40,7 @@ defmodule Nebulex.Entry do
   def encode(data, opts \\ []) do
     data
     |> :erlang.term_to_binary(opts)
-    |> Base.url_encode64()
+    |> Base.url_encode64(padding: false)
   end
 
   @doc """
@@ -57,8 +57,8 @@ defmodule Nebulex.Entry do
   @spec decode(binary, [term]) :: term
   def decode(data, opts \\ []) when is_binary(data) do
     data
-    |> Base.url_decode64!()
-    |> :erlang.binary_to_term(opts)
+    |> Base.url_decode64!(padding: false)
+    |> :erlang.binary_to_term()
   end
 
   @doc """
