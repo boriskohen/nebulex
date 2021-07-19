@@ -1,7 +1,8 @@
 defmodule Nebulex.Adapters.ReplicatedTest do
   use Nebulex.NodeCase
-  # use Nebulex.CacheTest
+  use Nebulex.CacheTest
 
+  import Mock
   import Nebulex.CacheCase
 
   alias Nebulex.TestCache.{Replicated, ReplicatedMock}
@@ -111,15 +112,24 @@ defmodule Nebulex.Adapters.ReplicatedTest do
   describe "cluster" do
     test "node leaves and then rejoins", %{name: name} do
       cluster = :lists.usort(cluster_nodes())
-      assert Replicated.nodes() == cluster
+
+      wait_until(fn ->
+        assert Replicated.nodes() == cluster
+      end)
 
       Replicated.with_dynamic_cache(name, fn ->
         :ok = Replicated.leave_cluster()
+      end)
+
+      wait_until(fn ->
         assert Replicated.nodes() == cluster -- [node()]
       end)
 
       Replicated.with_dynamic_cache(name, fn ->
         :ok = Replicated.join_cluster()
+      end)
+
+      wait_until(fn ->
         assert Replicated.nodes() == cluster
       end)
     end
@@ -137,45 +147,73 @@ defmodule Nebulex.Adapters.ReplicatedTest do
     end
 
     test "ok: start/stop cache nodes" do
-      assert Replicated.put_all(a: 1, b: 2) == :ok
-      assert Replicated.put(:c, 3, ttl: 5000) == :ok
-      assert Replicated.nodes() |> :lists.usort() == :lists.usort(cluster_nodes())
+      event = [:nebulex, :test_cache, :replicated, :replication]
 
-      assert_for_all_replicas(
-        Replicated,
-        :get_all,
-        [[:a, :b, :c]],
-        %{a: 1, b: 2, c: 3}
-      )
+      with_telemetry_handler(__MODULE__, [event], fn ->
+        assert Replicated.nodes() |> :lists.usort() == :lists.usort(cluster_nodes())
 
-      # start new cache nodes
-      nodes = [:"node3@127.0.0.1", :"node4@127.0.0.1"]
-      node_pid_list = start_caches(nodes, [{Replicated, [name: @cache_name]}])
+        assert Replicated.put_all(a: 1, b: 2) == :ok
+        assert Replicated.put(:c, 3, ttl: 5000) == :ok
 
-      assert Replicated.nodes() |> :lists.usort() == :lists.usort(nodes ++ cluster_nodes())
-
-      wait_until(fn ->
         assert_for_all_replicas(
           Replicated,
           :get_all,
           [[:a, :b, :c]],
           %{a: 1, b: 2, c: 3}
         )
-      end)
 
-      # stop cache node
-      :ok = node_pid_list |> hd() |> List.wrap() |> stop_caches()
+        # start new cache nodes
+        nodes = [:"node3@127.0.0.1", :"node4@127.0.0.1"]
+        node_pid_list = start_caches(nodes, [{Replicated, [name: @cache_name]}])
 
-      wait_until(fn ->
+        wait_until(fn ->
+          assert Replicated.nodes() |> :lists.usort() == :lists.usort(nodes ++ cluster_nodes())
+        end)
+
+        wait_until(10, 1000, fn ->
+          assert_for_all_replicas(
+            Replicated,
+            :get_all,
+            [[:a, :b, :c]],
+            %{a: 1, b: 2, c: 3}
+          )
+        end)
+
+        # stop cache node
+        :ok = node_pid_list |> hd() |> List.wrap() |> stop_caches()
+
+        if Code.ensure_loaded?(:pg) do
+          # errors on failed nodes should be ignored
+          with_mock Nebulex.Cache.Cluster, [:passthrough],
+            get_nodes: fn _ -> [:"node5@127.0.0.1"] ++ nodes end do
+            assert Replicated.put(:foo, :bar) == :ok
+
+            assert_receive {^event, %{rpc_errors: 2}, meta}
+            assert meta[:adapter_meta][:cache] == Replicated
+            assert meta[:adapter_meta][:name] == :replicated_cache
+            assert meta[:function_name] == :put
+
+            assert [
+                     "node5@127.0.0.1": :noconnection,
+                     "node3@127.0.0.1": %Nebulex.RegistryLookupError{}
+                   ] = meta[:rpc_errors]
+          end
+        end
+
+        wait_until(10, 1000, fn ->
+          assert Replicated.nodes() |> :lists.usort() ==
+                   :lists.usort(cluster_nodes() ++ [:"node4@127.0.0.1"])
+        end)
+
         assert_for_all_replicas(
           Replicated,
           :get_all,
           [[:a, :b, :c]],
           %{a: 1, b: 2, c: 3}
         )
-      end)
 
-      :ok = stop_caches(node_pid_list)
+        :ok = stop_caches(node_pid_list)
+      end)
     end
   end
 

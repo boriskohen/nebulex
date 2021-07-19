@@ -8,6 +8,18 @@ defmodule Nebulex.CachingTest do
       adapter: Nebulex.Adapters.Local
   end
 
+  defmodule CacheWithDefaultKeyGenerator do
+    use Nebulex.Cache,
+      otp_app: :nebulex,
+      adapter: Nebulex.Adapters.Local,
+      default_key_generator: __MODULE__
+
+    @behaviour Nebulex.Caching.KeyGenerator
+
+    @impl true
+    def generate(mod, fun, args), do: :erlang.phash2({mod, fun, args})
+  end
+
   defmodule Meta do
     defstruct [:id, :count]
     @type t :: %__MODULE__{}
@@ -127,6 +139,14 @@ defmodule Nebulex.CachingTest do
       assert get_without_args() == "hello"
       assert Cache.get(0) == "hello"
     end
+
+    test "with side effects and returning false (issue #111)" do
+      refute Cache.get("side-effect")
+      assert get_false_with_side_effect(false) == false
+      assert Cache.get("side-effect") == 1
+      assert get_false_with_side_effect(false) == false
+      assert Cache.get("side-effect") == 1
+    end
   end
 
   describe "cache_put" do
@@ -211,7 +231,7 @@ defmodule Nebulex.CachingTest do
     end
   end
 
-  describe "key generator" do
+  describe "option :key_generator on" do
     test "cacheable annotation" do
       key = TestKeyGenerator.generate(__MODULE__, :get_with_keygen, [1, 2])
 
@@ -244,6 +264,28 @@ defmodule Nebulex.CachingTest do
     end
   end
 
+  describe "default key generator on" do
+    setup_with_cache(CacheWithDefaultKeyGenerator)
+
+    test "cacheable annotation" do
+      key = CacheWithDefaultKeyGenerator.generate(__MODULE__, :get_with_default_key_generator, [1])
+
+      refute CacheWithDefaultKeyGenerator.get(key)
+      assert get_with_default_key_generator(1) == 1
+      assert CacheWithDefaultKeyGenerator.get(key) == 1
+    end
+
+    test "cache_evict annotation" do
+      key = CacheWithDefaultKeyGenerator.generate(__MODULE__, :del_with_default_key_generator, [1])
+
+      :ok = CacheWithDefaultKeyGenerator.put(key, 1)
+      assert CacheWithDefaultKeyGenerator.get(key) == 1
+
+      assert del_with_default_key_generator(1) == 1
+      refute CacheWithDefaultKeyGenerator.get(key)
+    end
+  end
+
   ## Annotated Functions
 
   @decorate cacheable(cache: Cache)
@@ -260,6 +302,12 @@ defmodule Nebulex.CachingTest do
   @decorate cacheable(cache: Cache, opts: [ttl: 1000])
   def get_with_opts(x) do
     x
+  end
+
+  @decorate cacheable(cache: Cache)
+  def get_false_with_side_effect(v) do
+    Cache.update("side-effect", 1, &(&1 + 1))
+    v
   end
 
   @decorate cacheable(cache: Cache, match: fn x -> x != :x end)
@@ -358,6 +406,12 @@ defmodule Nebulex.CachingTest do
   def put_with_keygen(x, y) do
     x * y
   end
+
+  @decorate cacheable(cache: CacheWithDefaultKeyGenerator)
+  def get_with_default_key_generator(id), do: id
+
+  @decorate cache_evict(cache: CacheWithDefaultKeyGenerator)
+  def del_with_default_key_generator(id), do: id
 
   ## Private Functions
 

@@ -1,5 +1,5 @@
 defmodule Nebulex.Cache do
-  @moduledoc ~S"""
+  @moduledoc """
   Cache's main interface; defines the cache abstraction layer which is
   highly inspired by [Ecto](https://github.com/elixir-ecto/ecto).
 
@@ -35,21 +35,157 @@ defmodule Nebulex.Cache do
 
     * `:name` - The name of the Cache supervisor process.
 
+    * `:telemetry_prefix` - It is recommend for adapters to publish events
+      using the `Telemetry` library. By default, the telemetry prefix is based
+      on the module name, so if your module is called `MyApp.Cache`, the prefix
+      will be `[:my_app, :cache]`. See the "Telemetry events" section to see
+      what events recommended for the  adapters to publish.. Note that if you
+      have multiple caches, you should keep the `:telemetry_prefix` consistent
+      for each of them and use the `:cache` and/or `:name` (in case of a named
+      or dynamic cache) properties in the event metadata for distinguishing
+      between caches.
+
+    * `:telemetry` - An optional flag to tell the adapters whether Telemetry
+      events should be emitted or not. Defaults to `true`.
+
     * `:stats` - Boolean to define whether or not the cache will provide stats.
       Defaults to `false`. Each adapter is responsible for providing stats by
       implementing `Nebulex.Adapter.Stats` behaviour. See the "Stats" section
       below.
 
+  ## Telemetry events
+
+  Similar to Ecto or Phoenix, Nebulex also provides built-in Telemetry events
+  applied to all caches, and cache adapter-specific events.
+
+  ### Nebulex built-in events
+
+  The following events are emitted by all Nebulex caches:
+
+    * `[:nebulex, :cache, :init]` - it is dispatched whenever a cache starts.
+      The measurement is a single `system_time` entry in native unit. The
+      metadata is the `:cache` and all initialization options under `:opts`.
+
+  ### Adapter-specific events
+
+  It is recommend the adapters to publish certain `Telemetry` events listed
+  below. Those events will use the `:telemetry_prefix` outlined above which
+  defaults to `[:my_app, :cache]`.
+
+  For instance, to receive all events published by a cache called `MyApp.Cache`,
+  one could define a module:
+
+      defmodule MyApp.Telemetry do
+        def handle_event([:my_app, :cache, :command, event], measurements, metadata, config) do
+          case event do
+            :start ->
+              # Handle start event ...
+
+            :stop ->
+              # Handle stop event ...
+
+            :exception ->
+              # Handle exception event ...
+          end
+        end
+      end
+
+  Then, in the `Application.start/2` callback, attach the handler to this event
+  using a unique handler id:
+
+      :telemetry.attach(
+        "my-app-handler-id",
+        [:my_app, :cache, :command],
+        &MyApp.Telemetry.handle_event/4,
+        %{}
+      )
+
+  See [the telemetry documentation](https://hexdocs.pm/telemetry/)
+  for more information.
+
+  The following are the events you should expect from Nebulex. All examples
+  below consider a cache named `MyApp.Cache`:
+
+  #### `[:my_app, :cache, :command, :start]`
+
+  This event should be invoked on every cache call sent to the adapter before
+  the command logic is executed.
+
+  The `:measurements` map will include the following:
+
+    * `:system_time` - The current system time in native units from calling:
+      `System.system_time()`.
+
+  A Telemetry `:metadata` map including the following fields. Each cache adapter
+  may emit different information here. For built-in adapters, it will contain:
+
+    * `:adapter_meta` - The adapter metadata.
+    * `:function_name` - The name of the invoked adapter function.
+    * `:args` - The arguments of the invoked adapter function, omitting the
+      first argument, since it is the adapter metadata already included into
+      the event's metadata.
+
+  #### `[:my_app, :cache, :command, :stop]`
+
+  This event should be invoked on every cache call sent to the adapter after
+  the command logic is executed.
+
+  The `:measurements` map will include the following:
+
+    * `:duration` - The time spent executing the cache command. The measurement
+      is given in the `:native` time unit. You can read more about it in the
+      docs for `System.convert_time_unit/3`.
+
+  A Telemetry `:metadata` map including the following fields. Each cache adapter
+  may emit different information here. For built-in adapters, it will contain:
+
+    * `:adapter_meta` - The adapter metadata.
+    * `:function_name` - The name of the invoked adapter function.
+    * `:args` - The arguments of the invoked adapter function, omitting the
+      first argument, since it is the adapter metadata already included into
+      the event's metadata.
+    * `:result` - The command result.
+
+  #### `[:my_app, :cache, :command, :exception]`
+
+  This event should be invoked when an error or exception occurs while executing
+  the cache command.
+
+  The `:measurements` map will include the following:
+
+    * `:duration` - The time spent executing the cache command. The measurement
+      is given in the `:native` time unit. You can read more about it in the
+      docs for `System.convert_time_unit/3`.
+
+  A Telemetry `:metadata` map including the following fields. Each cache adapter
+  may emit different information here. For built-in adapters, it will contain:
+
+    * `:adapter_meta` - The adapter metadata.
+    * `:function_name` - The name of the invoked adapter function.
+    * `:args` - The arguments of the invoked adapter function, omitting the
+      first argument, since it is the adapter metadata already included into
+      the event's metadata.
+    * `:kind` - The type of the error: `:error`, `:exit`, or `:throw`.
+    * `:reason` - The reason of the error.
+    * `:stacktrace` - The stacktrace.
+
+  **NOTE:** The events outlined above are the recommended for the adapters
+  to dispatch. However, it is highly recommended to review the used adapter
+  documentation to ensure it is fullly compatible with these events, perhaps
+  differences, or perhaps also additional events.
+
   ## Stats
 
-  Stats support depends on the adapter entirely, it should implement the
-  optional behaviour `Nebulex.Adapter.Stats` to support so. Nevertheless,
-  the behaviour `Nebulex.Adapter.Stats` brings with a default implementation
-  using [Erlang counters][https://erlang.org/doc/man/counters.html], which is
-  used by the local built-in adapter (`Nebulex.Adapters.Local`).
+  Stats are provided by the adapters by implementing the optional behaviour
+  `Nebulex.Adapter.Stats`. This behaviour exposes a callback to return the
+  current cache stats.  Nevertheless, the behaviour brings with a default
+  implementation using [Erlang counters][counters], which is used by the
+  local built-in adapter (`Nebulex.Adapters.Local`).
 
-  To use stats it is a matter to set the option `:stats` to `true` into the
-  Cache options. For example, you can do it in the configuration file:
+  [counters]: https://erlang.org/doc/man/counters.html
+
+  One can enable the stats by setting the option `:stats` to `true`.
+  For example, in the configuration file:
 
       config :my_app, MyApp.Cache,
         stats: true,
@@ -60,16 +196,16 @@ defmodule Nebulex.Cache do
 
   See `c:Nebulex.Cache.stats/0` for more information.
 
-  ## Telemetry events
+  ## Dispatching stats via Telemetry
 
   It is possible to emit Telemetry events for the current stats via
-  `c:Nebulex.Cache.dispatch_stats/1`, but it has to be called explicitly,
-  Nebulex does not emit Telemetry events on its own. But it is pretty easy
-  to emit this event using [`:telemetry_poller`][telemetry_poller].
+  `c:Nebulex.Cache.dispatch_stats/1`, but it has to be invoked explicitly;
+  Nebulex does not emit this Telemetry event automatically. But it is very
+  easy to emit this event using [`:telemetry_poller`][telemetry_poller].
 
   [telemetry_poller]: https://github.com/beam-telemetry/telemetry_poller
 
-  For example, we can define a custom pollable measurement:
+  For example, one can define a custom pollable measurement:
 
       :telemetry_poller.start_link(
         measurements: [
@@ -81,7 +217,7 @@ defmodule Nebulex.Cache do
       )
 
   Or you can also start the `:telemetry_poller` process along with your
-  application supervision tree, like so:
+  application supervision tree:
 
       def start(_type, _args) do
         my_cache_stats_poller_opts = [
@@ -154,6 +290,7 @@ defmodule Nebulex.Cache do
       @adapter adapter
       @opts opts
       @default_dynamic_cache opts[:default_dynamic_cache] || __MODULE__
+      @default_key_generator opts[:default_key_generator] || Nebulex.Caching.SimpleKeyGenerator
       @before_compile adapter
 
       ## Config and metadata
@@ -166,6 +303,9 @@ defmodule Nebulex.Cache do
 
       @impl true
       def __adapter__, do: @adapter
+
+      @impl true
+      def __default_key_generator__, do: @default_key_generator
 
       ## Process lifecycle
 
@@ -415,6 +555,21 @@ defmodule Nebulex.Cache do
   Returns the adapter tied to the cache.
   """
   @callback __adapter__ :: Nebulex.Adapter.t()
+
+  @doc """
+  Returns the default key generator applied only when using
+  **"declarative annotation-based caching"** via `Nebulex.Caching`.
+
+  Sometimes you may want to set a different key generator when using
+  declarative caching. By default, the key generator is set to
+  `Nebulex.Caching.SimpleKeyGenerator`. You can change the default
+  key generator at compile time with:
+
+      use Nebulex.Cache, default_key_generator: MyKeyGenerator
+
+  See `Nebulex.Caching` and `Nebulex.Caching.KeyGenerator` for more information.
+  """
+  @callback __default_key_generator__ :: Nebulex.Caching.KeyGenerator.t()
 
   @doc """
   Returns the adapter configuration stored in the `:otp_app` environment.

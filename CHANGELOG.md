@@ -1,5 +1,89 @@
 # Changelog
 
+All notable changes to this project will be documented in this file.
+
+This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [v2.1.1](https://github.com/cabol/nebulex/tree/v2.1.1) (2021-06-25)
+
+[Full Changelog](https://github.com/cabol/nebulex/compare/v2.1.0...v2.1.1)
+
+**Implemented enhancements:**
+
+- Add cache option `:default_key_generator` to change the key generator at
+  compile-time [#126](https://github.com/cabol/nebulex/issues/126)
+
+**Closed issues:**
+
+- Hits/Misses statistics not updated when using `get_all`
+  [#125](https://github.com/cabol/nebulex/issues/125)
+- Compilation fails in file lib/nebulex/rpc.ex
+  [#123](https://github.com/cabol/nebulex/issues/123)
+- Nebulex.Caching.SimpleKeyGenerator should produce a unique key
+  [#122](https://github.com/cabol/nebulex/issues/122)
+
+**Merged pull requests:**
+
+- Fix typo in `getting-started.md` guide
+  [#124](https://github.com/cabol/nebulex/pull/124)
+  ([RudolfMan](https://github.com/RudolfMan))
+
+## [v2.1.0](https://github.com/cabol/nebulex/tree/v2.1.0) (2021-05-15)
+
+[Full Changelog](https://github.com/cabol/nebulex/compare/v2.0.0...v2.1.0)
+
+**Added features:**
+
+- Telemetry handler for aggregating and/or handling cache stats
+  [#119](https://github.com/cabol/nebulex/issues/119)
+- Instrument multi-level adapter with the recommended Telemetry events
+  [#118](https://github.com/cabol/nebulex/issues/118)
+- Instrument replicated adapter with the recommended Telemetry events
+  [#117](https://github.com/cabol/nebulex/issues/117)
+- Instrument partitioned adapter with the recommended Telemetry events
+  [#116](https://github.com/cabol/nebulex/issues/116)
+- Instrument the local adapter with the recommended Telemetry events
+  [#115](https://github.com/cabol/nebulex/issues/115)
+- Add custom key generator support by implementing
+  `Nebulex.Caching.KeyGenerator` behaviour
+  [#109](https://github.com/cabol/nebulex/issues/109)
+- Add default key generator `Nebulex.Caching.SimpleKeyGenerator`
+
+**Implemented enhancements:**
+
+- Settle down the foundations to support Telemetry events in the adapters
+  [#114](https://github.com/cabol/nebulex/issues/114)
+- Support `:before_invocation` option in the `cache_evict` annotation
+  [#110](https://github.com/cabol/nebulex/issues/110)
+
+**Fixed bugs:**
+
+- Possible race-condition when removing older generation while ongoing
+  operations on it [#121](https://github.com/cabol/nebulex/issues/121)
+- Bug on boolean values [#111](https://github.com/cabol/nebulex/issues/111)
+- Issue when raising Nebulex.RPCMultiCallError in replicated adapter
+  [#108](https://github.com/cabol/nebulex/issues/108)
+
+**Closed issues:**
+
+- Use of `:ets` reference after delete
+  [#120](https://github.com/cabol/nebulex/issues/120)
+- Node's that are gracefully shutting down trigger Nebulex errors
+  [#113](https://github.com/cabol/nebulex/issues/113)
+- Rolling deployment after adding the cache does not start new nodes
+  [#107](https://github.com/cabol/nebulex/issues/107)
+- Unable to migrate to v.2 https://hexdocs.pm/nebulex/migrating-to-v2.html is
+  broken [#102](https://github.com/cabol/nebulex/issues/102)
+
+**Merged pull requests:**
+
+- Avoid calling `cacheable()` method when cached value is `false`
+  [#112](https://github.com/cabol/nebulex/pull/112)
+  ([escobera](https://github.com/escobera))
+- Declarative annotation-based caching improvements
+  [#105](https://github.com/cabol/nebulex/pull/105)
+  ([cabol](https://github.com/cabol))
+
 ## [v2.0.0](https://github.com/cabol/nebulex/tree/v2.0.0) (2021-02-20)
 
 [Full Changelog](https://github.com/cabol/nebulex/compare/v2.0.0-rc.2...v2.0.0)

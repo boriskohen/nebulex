@@ -1,5 +1,11 @@
 defmodule Nebulex.Adapters.StatsTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case
+
+  import Nebulex.CacheCase
+
+  alias Nebulex.Cache.Stats
+
+  ## Shared cache
 
   defmodule Cache do
     use Nebulex.Cache,
@@ -31,10 +37,7 @@ defmodule Nebulex.Adapters.StatsTest do
     end
   end
 
-  import Nebulex.CacheCase
-  import Mock
-
-  alias Nebulex.Cache.Stats
+  ## Shared constants
 
   @config [
     model: :inclusive,
@@ -45,7 +48,11 @@ defmodule Nebulex.Adapters.StatsTest do
     ]
   ]
 
-  describe "stats/0" do
+  @event [:nebulex, :adapters, :stats_test, :cache, :stats]
+
+  ## Tests
+
+  describe "(multilevel) stats/0" do
     setup_with_cache(Cache, [stats: true] ++ @config)
 
     test "hits and misses" do
@@ -57,10 +64,12 @@ defmodule Nebulex.Adapters.StatsTest do
       refute Cache.get(:c)
       refute Cache.get(:d)
 
+      assert Cache.get_all([:a, :b, :c, :d]) == %{a: 1, b: 2}
+
       assert_stats_measurements(Cache,
-        l1: [hits: 3, misses: 2, writes: 2],
-        l2: [hits: 0, misses: 2, writes: 2],
-        l3: [hits: 0, misses: 2, writes: 2]
+        l1: [hits: 5, misses: 4, writes: 2],
+        l2: [hits: 0, misses: 4, writes: 2],
+        l3: [hits: 0, misses: 4, writes: 2]
       )
     end
 
@@ -83,11 +92,13 @@ defmodule Nebulex.Adapters.StatsTest do
       :ok = Process.sleep(1100)
       refute Cache.get(:a)
 
-      assert_stats_measurements(Cache,
-        l1: [expirations: 1, misses: 1, writes: 8, updates: 4],
-        l2: [expirations: 1, misses: 1, writes: 8, updates: 4],
-        l3: [expirations: 1, misses: 1, writes: 8, updates: 4]
-      )
+      wait_until(fn ->
+        assert_stats_measurements(Cache,
+          l1: [expirations: 1, misses: 1, writes: 8, updates: 4],
+          l2: [expirations: 1, misses: 1, writes: 8, updates: 4],
+          l3: [expirations: 1, misses: 1, writes: 8, updates: 4]
+        )
+      end)
     end
 
     test "evictions" do
@@ -122,11 +133,47 @@ defmodule Nebulex.Adapters.StatsTest do
       :ok = Process.sleep(1100)
       assert Cache.get_all([:a, :b, :c, :d]) == %{a: 1, b: 2}
 
-      assert_stats_measurements(Cache,
-        l1: [evictions: 2, expirations: 2, hits: 6, misses: 2, writes: 4],
-        l2: [evictions: 2, expirations: 2, hits: 0, misses: 2, writes: 4],
-        l3: [evictions: 2, expirations: 2, hits: 0, misses: 2, writes: 4]
-      )
+      wait_until(fn ->
+        assert_stats_measurements(Cache,
+          l1: [evictions: 2, expirations: 2, hits: 6, misses: 2, writes: 4],
+          l2: [evictions: 2, expirations: 2, hits: 0, misses: 2, writes: 4],
+          l3: [evictions: 2, expirations: 2, hits: 0, misses: 2, writes: 4]
+        )
+      end)
+    end
+  end
+
+  describe "(replicated) stats/0" do
+    alias Cache.L2, as: Replicated
+
+    setup_with_cache(Replicated, [stats: true] ++ @config)
+
+    test "hits and misses" do
+      :ok = Replicated.put_all(a: 1, b: 2)
+
+      assert Replicated.get(:a) == 1
+      assert Replicated.get_all([:a, :b, :c, :d]) == %{a: 1, b: 2}
+
+      assert %Nebulex.Stats{measurements: measurements} = Replicated.stats()
+      assert measurements.hits == 3
+      assert measurements.misses == 2
+    end
+  end
+
+  describe "(partitioned) stats/0" do
+    alias Cache.L3, as: Partitioned
+
+    setup_with_cache(Partitioned, [stats: true] ++ @config)
+
+    test "hits and misses" do
+      :ok = Partitioned.put_all(a: 1, b: 2)
+
+      assert Partitioned.get(:a) == 1
+      assert Partitioned.get_all([:a, :b, :c, :d]) == %{a: 1, b: 2}
+
+      assert %Nebulex.Stats{measurements: measurements} = Partitioned.stats()
+      assert measurements.hits == 3
+      assert measurements.misses == 2
     end
   end
 
@@ -256,23 +303,11 @@ defmodule Nebulex.Adapters.StatsTest do
     end
 
     test "dispatch_stats/1 is skipped" do
-      with_mock :telemetry, [], execute: fn _, _, _ -> :ok end do
+      with_telemetry_handler(__MODULE__, [@event], fn ->
         :ok = Cache.dispatch_stats()
 
-        refute called(
-                 :telemetry.execute(
-                   [:nebulex, :cache, :stats_test, :cache],
-                   %{
-                     hits: 0,
-                     misses: 0,
-                     writes: 0,
-                     evictions: 0,
-                     expirations: 0
-                   },
-                   %{cache: Nebulex.Cache.StatsTest.Cache}
-                 )
-               )
-      end
+        refute_receive {@event, _, %{cache: Nebulex.Cache.StatsTest.Cache}}
+      end)
     end
   end
 
@@ -280,43 +315,42 @@ defmodule Nebulex.Adapters.StatsTest do
     setup_with_cache(Cache, [stats: true] ++ @config)
 
     test "emits a telemetry event when called" do
-      with_mock :telemetry, [], execute: fn _, _, _ -> :ok end do
+      with_telemetry_handler(__MODULE__, [@event], fn ->
         :ok = Cache.dispatch_stats(metadata: %{node: node()})
+        node = node()
 
-        assert called(
-                 :telemetry.execute(
-                   [:nebulex, :cache, :stats],
-                   %{
-                     l1: %{hits: 0, misses: 0, writes: 0, evictions: 0, expirations: 0},
-                     l2: %{hits: 0, misses: 0, writes: 0, evictions: 0, expirations: 0},
-                     l3: %{hits: 0, misses: 0, writes: 0, evictions: 0, expirations: 0}
-                   },
-                   %{cache: Nebulex.Adapters.StatsTest.Cache, node: node()}
-                 )
-               )
-      end
+        assert_receive {@event, measurements,
+                        %{cache: Nebulex.Adapters.StatsTest.Cache, node: ^node}}
+
+        assert measurements == %{
+                 l1: %{hits: 0, misses: 0, writes: 0, evictions: 0, expirations: 0, updates: 0},
+                 l2: %{hits: 0, misses: 0, writes: 0, evictions: 0, expirations: 0, updates: 0},
+                 l3: %{hits: 0, misses: 0, writes: 0, evictions: 0, expirations: 0, updates: 0}
+               }
+      end)
     end
   end
 
   describe "dispatch_stats/1 with dynamic cache" do
-    setup_with_dynamic_cache(Cache, :stats_with_dispatch, [stats: true] ++ @config)
+    setup_with_dynamic_cache(
+      Cache,
+      :stats_with_dispatch,
+      [telemetry_prefix: [:my_event], stats: true] ++ @config
+    )
 
     test "emits a telemetry event with custom telemetry_prefix when called" do
-      with_mock :telemetry, [], execute: fn _, _, _ -> :ok end do
-        :ok = Cache.dispatch_stats(event_prefix: [:my_event], metadata: %{foo: :bar})
+      with_telemetry_handler(__MODULE__, [[:my_event, :stats]], fn ->
+        :ok = Cache.dispatch_stats(metadata: %{foo: :bar})
 
-        assert called(
-                 :telemetry.execute(
-                   [:my_event, :stats],
-                   %{
-                     l1: %{hits: 0, misses: 0, writes: 0, evictions: 0, expirations: 0},
-                     l2: %{hits: 0, misses: 0, writes: 0, evictions: 0, expirations: 0},
-                     l3: %{hits: 0, misses: 0, writes: 0, evictions: 0, expirations: 0}
-                   },
-                   %{cache: :stats_with_dispatch, foo: :bar}
-                 )
-               )
-      end
+        assert_receive {[:my_event, :stats], measurements,
+                        %{cache: :stats_with_dispatch, foo: :bar}}
+
+        assert measurements == %{
+                 l1: %{hits: 0, misses: 0, writes: 0, evictions: 0, expirations: 0, updates: 0},
+                 l2: %{hits: 0, misses: 0, writes: 0, evictions: 0, expirations: 0, updates: 0},
+                 l3: %{hits: 0, misses: 0, writes: 0, evictions: 0, expirations: 0, updates: 0}
+               }
+      end)
     end
   end
 

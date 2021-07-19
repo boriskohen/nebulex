@@ -63,7 +63,7 @@ For example, if you want to use a built-in cache, add to your `mix.exs` file:
 ```elixir
 def deps do
   [
-    {:nebulex, "~> 2.0"},
+    {:nebulex, "~> 2.1"},
     {:shards, "~> 1.0"},     #=> When using :shards as backend
     {:decorator, "~> 1.3"},  #=> When using Caching Annotations
     {:telemetry, "~> 0.4"}   #=> When using the Telemetry events (Nebulex stats)
@@ -82,12 +82,12 @@ makes all dependencies optional. For example:
     [declarative annotation-based caching via decorators][nbx_caching],
     you have to add `:decorator` to the dependency list.
 
-  * For enabling Telemetry events to be dispatched when using Nebulex stats,
+  * For enabling Telemetry events to be dispatched when using Nebulex,
     you have to add `:telemetry` to the dependency list.
     See [telemetry guide][telemetry].
 
-  * If you are using an adapter different than the built-in ones (e.g: Cachex
-    or Redis adapter), you have to add the adapter dependency too.
+  * If you want to use an external adapter (e.g: Cachex or Redis adapter), you
+    have to add the adapter dependency too.
 
 [telemetry]: http://hexdocs.pm/nebulex/telemetry.html
 

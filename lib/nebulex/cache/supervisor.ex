@@ -4,6 +4,8 @@ defmodule Nebulex.Cache.Supervisor do
 
   import Nebulex.Helpers
 
+  alias Nebulex.Telemetry
+
   @doc """
   Starts the cache manager supervisor.
   """
@@ -16,8 +18,18 @@ defmodule Nebulex.Cache.Supervisor do
   Retrieves the runtime configuration.
   """
   def runtime_config(cache, otp_app, opts) do
-    config = Application.get_env(otp_app, cache, [])
-    config = [otp_app: otp_app] ++ Keyword.merge(config, opts)
+    # config = Application.get_env(otp_app, cache, [])
+    # config = [otp_app: otp_app] ++ Keyword.merge(config, opts)
+    # config = Keyword.put_new_lazy(config, :telemetry_prefix, fn -> telemetry_prefix(cache) end)
+
+    config =
+      otp_app
+      |> Application.get_env(cache, [])
+      |> Keyword.merge(opts)
+      |> Keyword.put(:otp_app, otp_app)
+      |> Keyword.put_new_lazy(:telemetry_prefix, fn -> telemetry_prefix(cache) end)
+      |> Keyword.update(:telemetry, true, &(is_boolean(&1) && &1))
+
     cache_init(cache, config)
   end
 
@@ -52,6 +64,12 @@ defmodule Nebulex.Cache.Supervisor do
   def init({cache, otp_app, adapter, opts}) do
     case runtime_config(cache, otp_app, opts) do
       {:ok, opts} ->
+        Telemetry.execute(
+          [:nebulex, :cache, :init],
+          %{system_time: System.system_time()},
+          %{cache: cache, opts: opts}
+        )
+
         {:ok, child, meta} = adapter.init([cache: cache] ++ opts)
         meta = Map.put(meta, :cache, cache)
         child_spec = wrap_child_spec(child, [adapter, meta])
@@ -83,5 +101,12 @@ defmodule Nebulex.Cache.Supervisor do
 
   defp wrap_child_spec(%{start: start} = spec, args) do
     %{spec | start: {__MODULE__, :start_child, [start | args]}}
+  end
+
+  # sobelow_skip ["DOS.StringToAtom"]
+  defp telemetry_prefix(cache) do
+    cache
+    |> Module.split()
+    |> Enum.map(&(&1 |> Macro.underscore() |> String.to_atom()))
   end
 end

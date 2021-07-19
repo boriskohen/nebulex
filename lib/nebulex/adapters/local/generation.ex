@@ -50,6 +50,9 @@ defmodule Nebulex.Adapters.Local.Generation do
 
   # State
   defstruct [
+    :cache,
+    :telemetry,
+    :telemetry_prefix,
     :meta_tab,
     :backend,
     :backend_opts,
@@ -71,6 +74,8 @@ defmodule Nebulex.Adapters.Local.Generation do
   alias Nebulex.Adapter.Stats
   alias Nebulex.Adapters.Local
   alias Nebulex.Adapters.Local.{Backend, Metadata}
+  alias Nebulex.Telemetry
+  alias Nebulex.Telemetry.StatsHandler
 
   @type t :: %__MODULE__{}
   @type server_ref :: pid | atom | :ets.tid()
@@ -230,6 +235,9 @@ defmodule Nebulex.Adapters.Local.Generation do
 
   @impl true
   def init(opts) do
+    # Trap exit signals to run cleanup process
+    _ = Process.flag(:trap_exit, true)
+
     # Initial state
     state = struct(__MODULE__, parse_opts(opts))
 
@@ -244,27 +252,26 @@ defmodule Nebulex.Adapters.Local.Generation do
         do: {new_gen(state), start_timer(state.gc_interval)},
         else: {new_gen(state), nil}
 
-    {:ok, %{state | gc_cleanup_ref: cleanup_ref, gc_heartbeat_ref: ref}}
+    # Update state
+    state = %{state | gc_cleanup_ref: cleanup_ref, gc_heartbeat_ref: ref}
+
+    {:ok, state, {:continue, :attach_stats_handler}}
   end
 
   defp parse_opts(opts) do
-    # Add the GC PID to the meta table
-    meta_tab = Keyword.fetch!(opts, :meta_tab)
-    :ok = Metadata.put(meta_tab, :gc_pid, self())
+    # Get adapter metadata
+    adapter_meta = Keyword.fetch!(opts, :adapter_meta)
 
-    # Backend for creating new tables
-    backend = Keyword.fetch!(opts, :backend)
-    backend_opts = Keyword.get(opts, :backend_opts, [])
+    # Add the GC PID to the meta table
+    meta_tab = Map.fetch!(adapter_meta, :meta_tab)
+    :ok = Metadata.put(meta_tab, :gc_pid, self())
 
     # Common validators
     pos_integer = &(is_integer(&1) and &1 > 0)
     pos_integer_or_nil = &((is_integer(&1) and &1 > 0) or is_nil(&1))
 
-    %{
-      meta_tab: meta_tab,
-      backend: backend,
-      backend_opts: backend_opts,
-      stats_counter: opts[:stats_counter],
+    Map.merge(adapter_meta, %{
+      backend_opts: Keyword.get(opts, :backend_opts, []),
       gc_interval: get_option(opts, :gc_interval, "an integer > 0", pos_integer_or_nil),
       max_size: get_option(opts, :max_size, "an integer > 0", pos_integer_or_nil),
       allocated_memory: get_option(opts, :allocated_memory, "an integer > 0", pos_integer_or_nil),
@@ -272,18 +279,44 @@ defmodule Nebulex.Adapters.Local.Generation do
         get_option(opts, :gc_cleanup_min_timeout, "an integer > 0", pos_integer, 10_000),
       gc_cleanup_max_timeout:
         get_option(opts, :gc_cleanup_max_timeout, "an integer > 0", pos_integer, 600_000)
-    }
+    })
   end
 
   @impl true
-  def handle_call(:delete_all, _from, %__MODULE__{meta_tab: meta_tab, backend: backend} = state) do
-    size = Local.execute(%{meta_tab: meta_tab, backend: backend}, :count_all, nil, [])
+  def handle_continue(:attach_stats_handler, %__MODULE__{stats_counter: nil} = state) do
+    {:noreply, state}
+  end
+
+  def handle_continue(:attach_stats_handler, %__MODULE__{stats_counter: stats_counter} = state) do
+    _ =
+      Telemetry.attach_many(
+        stats_counter,
+        [state.telemetry_prefix ++ [:command, :stop]],
+        &StatsHandler.handle_event/4,
+        stats_counter
+      )
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    if ref = state.stats_counter, do: Telemetry.detach(ref)
+  end
+
+  @impl true
+  def handle_call(:delete_all, _from, %__MODULE__{} = state) do
+    size =
+      state
+      |> Map.from_struct()
+      |> Local.execute(:count_all, nil, [])
+
     :ok = new_gen(state)
 
     :ok =
-      meta_tab
+      state.meta_tab
       |> list()
-      |> Enum.each(&backend.delete_all_objects(&1))
+      |> Enum.each(&state.backend.delete_all_objects(&1))
 
     {:reply, size, %{state | gc_heartbeat_ref: maybe_reset_timer(true, state)}}
   end
@@ -326,10 +359,6 @@ defmodule Nebulex.Adapters.Local.Generation do
       |> check_size()
       |> check_memory()
 
-    {:noreply, state}
-  end
-
-  def handle_info(_message, state) do
     {:noreply, state}
   end
 
@@ -418,8 +447,11 @@ defmodule Nebulex.Adapters.Local.Generation do
         # Since the older generation is deleted, update evictions count
         :ok = Stats.incr(stats_counter, :evictions, backend.info(older, :size))
 
-        # Delete older generation
-        _ = Backend.delete(backend, meta_tab, older)
+        # Process the older generation:
+        # - Delete previously stored deprecated generation
+        # - Flush the older generation
+        # - Deprecate it (mark it for deletion)
+        :ok = process_older_gen(meta_tab, backend, older)
 
         # Update generations
         Metadata.put(meta_tab, :generations, [gen_tab, newer])
@@ -432,6 +464,24 @@ defmodule Nebulex.Adapters.Local.Generation do
         # update generations
         Metadata.put(meta_tab, :generations, [gen_tab])
     end
+  end
+
+  # The older generation cannot be removed immediately because there may be
+  # ongoing operations using it, then it may cause race-condition errors.
+  # Hence, the idea is to keep it alive till a new generation is pushed, but
+  # flushing its data before so that we release memory space. By the time a new
+  # generation is pushed, then it is safe to delete it completely.
+  defp process_older_gen(meta_tab, backend, older) do
+    if deprecated = Metadata.get(meta_tab, :deprecated) do
+      # Delete deprecated generation if it does exist
+      _ = Backend.delete(backend, meta_tab, deprecated)
+    end
+
+    # Flush older generation to release space so it can be marked for deletion
+    true = backend.delete_all_objects(older)
+
+    # Keep alive older generation reference into the metadata
+    Metadata.put(meta_tab, :deprecated, older)
   end
 
   defp start_timer(time, ref \\ nil, event \\ :heartbeat) do

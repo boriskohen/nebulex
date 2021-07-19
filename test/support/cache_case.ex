@@ -1,6 +1,8 @@
 defmodule Nebulex.CacheCase do
   @moduledoc false
 
+  alias Nebulex.Telemetry
+
   @doc false
   defmacro deftests(do: block) do
     quote do
@@ -115,5 +117,25 @@ defmodule Nebulex.CacheCase do
       :ok = cache.put(key, value, opts)
       value
     end
+  end
+
+  @doc false
+  def with_telemetry_handler(handler_id \\ :nbx_telemetry_test, events, fun) do
+    :ok =
+      Telemetry.attach_many(
+        handler_id,
+        events,
+        &__MODULE__.handle_event/4,
+        %{pid: self()}
+      )
+
+    fun.()
+  after
+    Telemetry.detach(handler_id)
+  end
+
+  @doc false
+  def handle_event(event, measurements, metadata, %{pid: pid}) do
+    send(pid, {event, measurements, metadata})
   end
 end

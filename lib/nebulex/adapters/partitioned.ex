@@ -225,9 +225,9 @@ defmodule Nebulex.Adapters.Partitioned do
   # Inherit default keyslot implementation
   use Nebulex.Adapter.Keyslot
 
+  import Nebulex.Adapter
   import Nebulex.Helpers
 
-  alias Nebulex.Adapter
   alias Nebulex.Cache.Cluster
   alias Nebulex.RPC
 
@@ -265,7 +265,7 @@ defmodule Nebulex.Adapters.Partitioned do
       A convenience function to get the node of the given `key`.
       """
       def get_node(key) do
-        Adapter.with_meta(get_dynamic_cache(), fn _adapter, %{name: name, keyslot: keyslot} ->
+        with_meta(get_dynamic_cache(), fn _adapter, %{name: name, keyslot: keyslot} ->
           Cluster.get_node(name, key, keyslot)
         end)
       end
@@ -288,22 +288,21 @@ defmodule Nebulex.Adapters.Partitioned do
 
   @impl true
   def init(opts) do
-    # Required cache name
+    # Required options
+    telemetry_prefix = Keyword.fetch!(opts, :telemetry_prefix)
+    telemetry = Keyword.fetch!(opts, :telemetry)
     cache = Keyword.fetch!(opts, :cache)
     name = opts[:name] || cache
 
     # Maybe use stats
-    stats = Keyword.get(opts, :stats, false)
-
-    unless is_boolean(stats) do
-      raise ArgumentError, "expected stats: to be boolean, got: #{inspect(stats)}"
-    end
+    stats = get_boolean_option(opts, :stats)
 
     # Primary cache options
     primary_opts =
-      opts
-      |> Keyword.get(:primary, [])
-      |> Keyword.put_new(:stats, stats)
+      Keyword.merge(
+        [telemetry_prefix: telemetry_prefix ++ [:primary], telemetry: telemetry, stats: stats],
+        Keyword.get(opts, :primary, [])
+      )
 
     # Maybe put a name to primary storage
     primary_opts =
@@ -320,14 +319,10 @@ defmodule Nebulex.Adapters.Partitioned do
     # Maybe task supervisor for distributed tasks
     {task_sup_name, children} = sup_child_spec(name, opts)
 
-    child_spec =
-      Nebulex.Adapters.Supervisor.child_spec(
-        name: normalize_module_name([name, Supervisor]),
-        strategy: :rest_for_one,
-        children: [{cache.__primary__, primary_opts}] ++ children
-      )
-
-    meta = %{
+    # Prepare metadata
+    adapter_meta = %{
+      telemetry_prefix: telemetry_prefix,
+      telemetry: telemetry,
       name: name,
       primary_name: primary_opts[:name],
       task_sup: task_sup_name,
@@ -335,10 +330,19 @@ defmodule Nebulex.Adapters.Partitioned do
       stats: stats
     }
 
-    # Join the cache to the cluster
-    :ok = Cluster.join(name)
+    # Prepare child_spec
+    child_spec =
+      Nebulex.Adapters.Supervisor.child_spec(
+        name: normalize_module_name([name, Supervisor]),
+        strategy: :rest_for_one,
+        children: [
+          {cache.__primary__, primary_opts},
+          {__MODULE__.Bootstrap, Map.put(adapter_meta, :cache, cache)}
+          | children
+        ]
+      )
 
-    {:ok, child_spec, meta}
+    {:ok, child_spec, adapter_meta}
   end
 
   if Code.ensure_loaded?(:erpc) do
@@ -362,12 +366,12 @@ defmodule Nebulex.Adapters.Partitioned do
   ## Nebulex.Adapter.Entry
 
   @impl true
-  def get(adapter_meta, key, opts) do
+  defspan get(adapter_meta, key, opts) do
     call(adapter_meta, key, :get, [key, opts], opts)
   end
 
   @impl true
-  def get_all(adapter_meta, keys, opts) do
+  defspan get_all(adapter_meta, keys, opts) do
     map_reduce(
       keys,
       adapter_meta,
@@ -388,30 +392,29 @@ defmodule Nebulex.Adapters.Partitioned do
   end
 
   @impl true
-  def put(adapter_meta, key, value, _ttl, on_write, opts) do
-    do_put(on_write, adapter_meta, key, value, opts)
-  end
+  defspan put(adapter_meta, key, value, _ttl, on_write, opts) do
+    case on_write do
+      :put ->
+        :ok = call(adapter_meta, key, :put, [key, value, opts], opts)
+        true
 
-  defp do_put(:put, adapter_meta, key, value, opts) do
-    :ok = call(adapter_meta, key, :put, [key, value, opts], opts)
-    true
-  end
+      :put_new ->
+        call(adapter_meta, key, :put_new, [key, value, opts], opts)
 
-  defp do_put(:put_new, adapter_meta, key, value, opts) do
-    call(adapter_meta, key, :put_new, [key, value, opts], opts)
-  end
-
-  defp do_put(:replace, adapter_meta, key, value, opts) do
-    call(adapter_meta, key, :replace, [key, value, opts], opts)
+      :replace ->
+        call(adapter_meta, key, :replace, [key, value, opts], opts)
+    end
   end
 
   @impl true
-  def put_all(adapter_meta, entries, _ttl, :put, opts) do
-    do_put_all(:put_all, adapter_meta, entries, opts)
-  end
+  defspan put_all(adapter_meta, entries, _ttl, on_write, opts) do
+    case on_write do
+      :put ->
+        do_put_all(:put_all, adapter_meta, entries, opts)
 
-  def put_all(adapter_meta, entries, _ttl, :put_new, opts) do
-    do_put_all(:put_new_all, adapter_meta, entries, opts)
+      :put_new ->
+        do_put_all(:put_new_all, adapter_meta, entries, opts)
+    end
   end
 
   def do_put_all(action, adapter_meta, entries, opts) do
@@ -451,53 +454,53 @@ defmodule Nebulex.Adapters.Partitioned do
   end
 
   @impl true
-  def delete(adapter_meta, key, opts) do
+  defspan delete(adapter_meta, key, opts) do
     call(adapter_meta, key, :delete, [key, opts], opts)
   end
 
   @impl true
-  def take(adapter_meta, key, opts) do
+  defspan take(adapter_meta, key, opts) do
     call(adapter_meta, key, :take, [key, opts], opts)
   end
 
   @impl true
-  def has_key?(adapter_meta, key) do
+  defspan has_key?(adapter_meta, key) do
     call(adapter_meta, key, :has_key?, [key])
   end
 
   @impl true
-  def update_counter(adapter_meta, key, amount, _ttl, _default, opts) do
+  defspan update_counter(adapter_meta, key, amount, _ttl, _default, opts) do
     call(adapter_meta, key, :incr, [key, amount, opts], opts)
   end
 
   @impl true
-  def ttl(adapter_meta, key) do
+  defspan ttl(adapter_meta, key) do
     call(adapter_meta, key, :ttl, [key])
   end
 
   @impl true
-  def expire(adapter_meta, key, ttl) do
+  defspan expire(adapter_meta, key, ttl) do
     call(adapter_meta, key, :expire, [key, ttl])
   end
 
   @impl true
-  def touch(adapter_meta, key) do
+  defspan touch(adapter_meta, key) do
     call(adapter_meta, key, :touch, [key])
   end
 
   ## Nebulex.Adapter.Queryable
 
   @impl true
-  def execute(%{name: name, task_sup: task_sup} = adapter_meta, operation, query, opts) do
+  defspan execute(adapter_meta, operation, query, opts) do
     reducer =
       case operation do
         :all -> &List.flatten/1
         _ -> &Enum.sum/1
       end
 
-    task_sup
+    adapter_meta.task_sup
     |> RPC.multi_call(
-      Cluster.get_nodes(name),
+      Cluster.get_nodes(adapter_meta.name),
       __MODULE__,
       :with_dynamic_cache,
       [adapter_meta, operation, [query, opts]],
@@ -507,10 +510,10 @@ defmodule Nebulex.Adapters.Partitioned do
   end
 
   @impl true
-  def stream(%{name: name, task_sup: task_sup} = adapter_meta, query, opts) do
+  defspan stream(adapter_meta, query, opts) do
     Stream.resource(
       fn ->
-        Cluster.get_nodes(name)
+        Cluster.get_nodes(adapter_meta.name)
       end,
       fn
         [] ->
@@ -519,7 +522,7 @@ defmodule Nebulex.Adapters.Partitioned do
         [node | nodes] ->
           elements =
             rpc_call(
-              task_sup,
+              adapter_meta.task_sup,
               node,
               __MODULE__,
               :eval_stream,
@@ -533,17 +536,34 @@ defmodule Nebulex.Adapters.Partitioned do
     )
   end
 
+  ## Nebulex.Adapter.Persistence
+
+  @impl true
+  defspan dump(adapter_meta, path, opts) do
+    super(adapter_meta, path, opts)
+  end
+
+  @impl true
+  defspan load(adapter_meta, path, opts) do
+    super(adapter_meta, path, opts)
+  end
+
   ## Nebulex.Adapter.Transaction
 
   @impl true
-  def transaction(%{name: name} = adapter_meta, opts, fun) do
-    super(adapter_meta, Keyword.put(opts, :nodes, Cluster.get_nodes(name)), fun)
+  defspan transaction(adapter_meta, opts, fun) do
+    super(adapter_meta, Keyword.put(opts, :nodes, Cluster.get_nodes(adapter_meta.name)), fun)
+  end
+
+  @impl true
+  defspan in_transaction?(adapter_meta) do
+    super(adapter_meta)
   end
 
   ## Nebulex.Adapter.Stats
 
   @impl true
-  def stats(adapter_meta) do
+  defspan stats(adapter_meta) do
     with_dynamic_cache(adapter_meta, :stats, [])
   end
 
@@ -578,10 +598,10 @@ defmodule Nebulex.Adapters.Partitioned do
     Cluster.get_node(name, key, keyslot)
   end
 
-  defp call(adapter_meta, key, fun, args, opts \\ []) do
+  defp call(adapter_meta, key, action, args, opts \\ []) do
     adapter_meta
     |> get_node(key)
-    |> rpc_call(adapter_meta, fun, args, opts)
+    |> rpc_call(adapter_meta, action, args, opts)
   end
 
   defp rpc_call(node, %{task_sup: task_sup} = meta, fun, args, opts) do
@@ -640,5 +660,45 @@ defmodule Nebulex.Adapters.Partitioned do
 
   defp handle_rpc_multi_call({responses, errors}, action, _) do
     raise Nebulex.RPCMultiCallError, action: action, responses: responses, errors: errors
+  end
+end
+
+defmodule Nebulex.Adapters.Partitioned.Bootstrap do
+  @moduledoc false
+  use GenServer
+
+  import Nebulex.Helpers
+
+  alias Nebulex.Cache.Cluster
+
+  ## API
+
+  @doc false
+  def start_link(%{name: name} = adapter_meta) do
+    GenServer.start_link(
+      __MODULE__,
+      adapter_meta,
+      name: normalize_module_name([name, Bootstrap])
+    )
+  end
+
+  ## GenServer Callbacks
+
+  @impl true
+  def init(adapter_meta) do
+    # Trap exit signals to run cleanup job
+    _ = Process.flag(:trap_exit, true)
+
+    # Ensure joining the cluster only when the cache supervision tree is started
+    :ok = Cluster.join(adapter_meta.name)
+
+    # Start bootstrap process
+    {:ok, adapter_meta}
+  end
+
+  @impl true
+  def terminate(_reason, adapter_meta) do
+    # Ensure leaving the cluster when the cache stops
+    :ok = Cluster.leave(adapter_meta.name)
   end
 end

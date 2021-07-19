@@ -1,5 +1,5 @@
 defmodule Nebulex.Adapter.Persistence do
-  @moduledoc ~S"""
+  @moduledoc """
   Specifies the adapter persistence API.
 
   ## Default implementation
@@ -84,6 +84,8 @@ defmodule Nebulex.Adapter.Persistence do
         end)
         |> handle_response()
       end
+
+      defoverridable dump: 3, load: 3
 
       ## Helpers
 
